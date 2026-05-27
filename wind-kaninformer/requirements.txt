@@ -1,0 +1,11 @@
+torch>=2.0.1
+pykan
+ewtpy
+vmdpy
+antropy
+einops
+scikit-learn
+scipy
+pandas
+numpy
+matplotlib
