@@ -39,48 +39,82 @@ def load_raw_csv(path):
 
 
 def clean_and_rename(df):
-    """Drop QC columns and rename to standard names."""
+    """Drop QC columns, metadata columns, and rename CIMIS names to standard names."""
+    # Drop QC columns (exact name 'qc' or contains 'qc' as standalone QC field)
     cols = list(df.columns)
-
-    # Identify data vs QC columns.
-    # CIMIS layout: Date, Hour (PST), then pairs of (data, QC) columns.
-    # QC columns contain 'Qc' or 'qc' in their name, or follow a pattern.
     keep = []
     for c in cols:
         lower = c.strip().lower()
-        # Keep if not a QC column
-        if 'qc' not in lower:
-            keep.append(c)
-
+        if lower == 'qc' or lower.startswith('qc.'):
+            continue
+        keep.append(c)
     df = df[keep].copy()
-    print(f'  After dropping QC columns: {list(df.columns)}')
 
-    # Rename columns to standard names
-    # Expected order after dropping QC: Date, Hour, ET, PCP, SR, VP, AT, RH, DPT, WS, WD, ST
-    expected_count = 12
-    if len(df.columns) < expected_count:
-        print(f'  WARNING: Expected {expected_count} columns, got {len(df.columns)}')
+    # Drop CIMIS station metadata (not used in the paper pipeline)
+    drop_meta = ['Stn Id', 'Stn Name', 'CIMIS Region', 'Jul']
+    df = df.drop(columns=[c for c in drop_meta if c in df.columns], errors='ignore')
+    print(f'  After dropping QC + metadata: {list(df.columns)}')
 
-    rename_map = {}
-    col_list = list(df.columns)
-
-    # Map by position (robust to varying column names)
-    standard_names = ['Date', 'Hour', 'ET', 'PCP', 'SR', 'VP', 'AT', 'RH', 'DPT', 'WS', 'WD', 'ST']
-    for i, std in enumerate(standard_names):
-        if i < len(col_list):
-            rename_map[col_list[i]] = std
-
-    df = df.rename(columns=rename_map)
+    # Rename by actual CIMIS column names (not by position)
+    cimis_rename = {
+        'Date': 'Date',
+        'Hour (PST)': 'Hour',
+        'ETo (in)': 'ET',
+        'Precip (in)': 'PCP',
+        'Sol Rad (Ly/day)': 'SR',
+        'Vap Pres (mBars)': 'VP',
+        'Air Temp (F)': 'AT',
+        'Rel Hum (%)': 'RH',
+        'Dew Point (F)': 'DPT',
+        'Wind Speed (mph)': 'WS',
+        'Wind Dir (0-360)': 'WD',
+        'Soil Temp (F)': 'ST',
+    }
+    df = df.rename(columns=cimis_rename)
     print(f'  Renamed columns: {list(df.columns)}')
     return df
 
 
 def parse_datetime_index(df):
-    """Parse Date column and set as index."""
-    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-    df = df.dropna(subset=['Date'])
-    df = df.set_index('Date')
-    df = df.drop(columns=['Hour'], errors='ignore')
+    """Combine Date + Hour into hourly datetime index."""
+    # CIMIS Date: MM/DD/YYYY  e.g. 12/1/2020
+    # CIMIS Hour: 0100, 0200, ... (HHMM, 24h) — may be read as int 100, 200
+    def format_hour(h):
+        s = str(h).strip().split('.')[0]  # 100.0 -> "100"
+        if not s.isdigit():
+            return s
+        val = int(s)
+        if val == 2400:
+            return '0000'  # midnight next day — date adjustment handled below
+        return str(val).zfill(4)
+
+    hour_str = df['Hour'].apply(format_hour)
+    datetime_str = df['Date'].astype(str).str.strip() + ' ' + hour_str
+    dt = pd.to_datetime(datetime_str, format='%m/%d/%Y %H%M', errors='coerce')
+
+    # CIMIS sometimes uses 2400 for end-of-day; roll to next calendar day 00:00
+    hour_raw = df['Hour'].apply(lambda h: str(h).strip().split('.')[0])
+    is_2400 = hour_raw == '2400'
+    if is_2400.any():
+        dt.loc[is_2400] = pd.to_datetime(
+            df.loc[is_2400, 'Date'].astype(str).str.strip(),
+            format='%m/%d/%Y',
+            errors='coerce',
+        ) + pd.Timedelta(days=1)
+
+    n_bad = dt.isna().sum()
+    if n_bad > 0:
+        print(f'  WARNING: {n_bad} rows failed strict datetime parse, retrying flexible parse')
+        bad = dt.isna()
+        dt.loc[bad] = pd.to_datetime(datetime_str.loc[bad], errors='coerce')
+
+    df = df.copy()
+    df['datetime'] = dt
+    df = df.dropna(subset=['datetime'])
+    df = df.set_index('datetime')
+    df = df.drop(columns=['Date', 'Hour'], errors='ignore')
+    df.index.name = 'Date'
+    print(f'  Parsed {len(df)} hourly timestamps')
     return df
 
 
@@ -100,8 +134,10 @@ def convert_units(df):
 
 
 def slice_season(df, start_date, end_date):
-    """Slice dataframe by date range (inclusive)."""
-    mask = (df.index >= start_date) & (df.index <= end_date)
+    """Slice dataframe by date range, inclusive of all hours on the last day."""
+    start = pd.Timestamp(start_date)
+    end = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+    mask = (df.index >= start) & (df.index <= end)
     return df.loc[mask].copy()
 
 
@@ -119,9 +155,9 @@ def main():
 
     df = load_raw_csv(config.RAW_CSV)
     df = clean_and_rename(df)
+    df = parse_datetime_index(df)   # must run before numeric conversion (Date/Hour are strings)
     df = convert_to_numeric(df)
     df = convert_units(df)
-    df = parse_datetime_index(df)
 
     # Keep only the 10 meteorological variables
     meteo_cols = config.ALL_METEO_VARS + [config.TARGET_VAR]
@@ -150,6 +186,10 @@ def main():
               f'max={season_df["WS"].max():.3f}, '
               f'mean={season_df["WS"].mean():.3f} m/s')
         print(f'    NaN counts: {season_df.isna().sum().to_dict()}')
+
+        if len(season_df) == 0:
+            print(f'  ERROR: {season} has 0 rows — check Date/Hour parsing in hourly.csv')
+            sys.exit(1)
 
     print('\nStep 1 complete.')
 

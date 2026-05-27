@@ -123,13 +123,17 @@ def process_season(season, args):
         return
 
     df = pd.read_csv(raw_path, index_col=0, parse_dates=True)
-    ws = df[config.TARGET_VAR].values
+    ws = pd.to_numeric(df[config.TARGET_VAR], errors='coerce').values.astype(float)
+
+    if len(ws) == 0:
+        print(f'  ERROR: No WS data for {season}. Re-run step1 with --force.')
+        return
 
     # Handle NaN in WS: interpolate linearly then fill edges
     if np.isnan(ws).any():
         n_nan = np.isnan(ws).sum()
         print(f'  WARNING: {n_nan} NaN in WS. Interpolating...')
-        ws_series = pd.Series(ws).interpolate(method='linear').fillna(method='bfill').fillna(method='ffill')
+        ws_series = pd.Series(ws).interpolate(method='linear').bfill().ffill()
         ws = ws_series.values
 
     print(f'  WS series length: {len(ws)}')

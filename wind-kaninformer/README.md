@@ -39,10 +39,13 @@ pip install -r requirements.txt
 
 The CSV must contain these columns (CIMIS standard format with QC columns):
 ```
-Date, Hour (PST), ETo (in), [QC], Precip (in), [QC], Sol Rad (Ly/day), [QC],
-Vap Pres (mBars), [QC], Air Temp (F), [QC], Rel Hum (%), [QC],
-Dew Point (F), [QC], Wind Speed (mph), [QC], Wind Dir (0-360), [QC], Soil Temp (F), [QC]
+Stn Id, Stn Name, CIMIS Region, Date, Hour (PST), Jul,
+ETo (in), [qc], Precip (in), [qc], Sol Rad (Ly/day), [qc],
+Vap Pres (mBars), [qc], Air Temp (F), [qc], Rel Hum (%), [qc],
+Dew Point (F), [qc], Wind Speed (mph), [qc], Wind Dir (0-360), [qc], Soil Temp (F), [qc]
 ```
+
+Step 1 automatically drops station metadata (`Stn Id`, `Stn Name`, `CIMIS Region`, `Jul`) and all QC columns, then renames the weather fields to `ET`, `PCP`, `SR`, `VP`, `AT`, `RH`, `DPT`, `WS`, `WD`, `ST`.
 
 ---
 
